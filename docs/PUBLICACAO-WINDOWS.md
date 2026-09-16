@@ -1,6 +1,6 @@
 # Publicação no Windows Server
 
-Este roteiro prepara a publicação do jogo no servidor da empresa, uma etapa distinta do envio ao GitHub. Nenhuma mudança no servidor, Tunnel ou DNS foi executada pelo assistente. A disponibilidade de portas, permissões e serviços existentes ainda precisa ser inspecionada no ambiente real.
+O usuário informou que o jogo já está publicado no servidor e possui participantes. Este documento conserva o roteiro de instalação e orienta atualizações. As melhorias com três vidas foram concluídas localmente e o usuário autorizou seu envio ao GitHub. A instalação desta atualização no servidor será uma etapa separada. Nenhuma alteração de servidor, Tunnel ou DNS é necessária para esta melhoria.
 
 ## 1. Preparar uma pasta e identidade próprias
 
@@ -91,9 +91,9 @@ Não usar `New-Service` diretamente com node.exe: o processo não implementa por
 
 1. Abrir a URL HTTPS em um Android e em um iPhone reais.
 2. Conferir a logo, controles, teclado do apelido, som opcional e tela pequena.
-3. Jogar uma partida completa de cada modo em cada aparelho; conferir o Freestyle com o celular deitado e dois dedos simultâneos.
-4. Verificar os rankings compartilhados nos dois aparelhos e a separação de pontuações entre os modos.
-5. Testar o botão de reenvio e a mensagem de falha em conexão instável.
+3. Jogar até perder três vidas nos dois modos; conferir o Freestyle em pé e deitado, com barras do Safari visíveis e dois dedos simultâneos. Testar acelerar/arrastar para cima e o botão de salto.
+4. Verificar os rankings compartilhados, a separação entre os dois jogos e a presença dos recordes antigos junto dos novos, mantendo o maior resultado de cada participante.
+5. Testar saída voluntária, troca de aplicativo, recarregamento, reenvio e conexão instável; conferir o último checkpoint após 30 segundos sem comunicação, considerando a limpeza periódica de dez segundos.
 6. Conferir que `/.env`, `/data/freedom.sqlite`, `/planejamento-local/README.md` e `/.git/config` retornam erro.
 7. Verificar que os sistemas já existentes continuam funcionando.
 8. Criar um backup consistente, testar restauração em uma cópia isolada e designar responsável pela moderação.
@@ -112,10 +112,27 @@ npm run qr -- https://SUBDOMINIO_ESCOLHIDO.freedom.dev.br
 
 Use o PNG ou SVG de `output/qrcode/`, com borda branca preservada e URL legível ao lado. O gerador recusa localhost e endereços que não sejam subdomínio HTTPS de freedom.dev.br. Gerar o QR não cria o subdomínio nem comprova que ele está acessível.
 
-## Atualização e reversão
+## Atualização com três vidas: preservar os dados
 
-Antes de atualizar, faça backup e guarde o pacote anterior. Pare apenas o processo do jogo, substitua os arquivos da aplicação e preserve `.env` e a pasta privada de dados. Suba novamente e valide a saúde e uma partida.
+Esta atualização **não exige reset de ranking**. O usuário escolheu manter recordes antigos junto dos novos. Os novos resultados são gravados em tabelas adicionais; o ranking apresenta o maior valor por participante e jogo entre as versões, sem reescrever as tabelas anteriores.
 
-Mudanças de regras não devem misturar pontuações incompatíveis. Nesta versão há um evento fixo; para outro evento ou mudança competitiva, faça backup e reinicie o ranking pelo comando local, após decidir essa operação.
+Checklist para executar após o envio autorizado ao repositório, quando o usuário solicitar a atualização do servidor:
 
-Se houver problema, restaure a versão anterior e, se necessário, o backup compatível, com o processo parado. Nunca sobreponha um banco em uso com arquivos copiados. Preserve os arquivos de dados e configuração até confirmar a recuperação.
+1. Identificar a pasta, o processo/supervisor do jogo e a DB_PATH efetivamente usados. Não alterar serviços dos outros sistemas.
+2. Executar `npm run admin -- backup` na versão instalada, usando a configuração correta. Conferir o arquivo consistente e guardá-lo fora de `public/`, junto da revisão anterior do código. Não copiar apenas o `.sqlite` ativo pelo Explorador.
+3. Registrar a listagem administrativa e conferir alguns recordes de referência. Preservar `.env`, a pasta privada de dados, ACLs, porta, domínio e configuração do Tunnel.
+4. Escolher um intervalo curto de menor uso e parar somente o processo do jogo pelo supervisor adotado. Clientes já carregados poderão tentar reenviar; as APIs legadas continuam compatíveis quando o serviço voltar.
+5. Atualizar os arquivos de código completos da revisão aprovada. Não substituir nem apagar a pasta de dados. Não executar `reset-event`, não inicializar um banco vazio e não alterar DB_PATH por acidente.
+6. Iniciar um único processo com a mesma configuração. A inicialização cria apenas as tabelas e índices adicionais necessários; os registros existentes permanecem.
+7. Conferir `/api/health`, o log de inicialização, os recordes anotados e a listagem `npm run admin -- list`. As colunas atuais mostram o ranking combinado; as históricas permitem conferir a pontuação anterior.
+8. Recarregar a página e testar uma partida de cada modo, incluindo encerramento por três vidas e saída antecipada. Verificar que uma pontuação nova menor não reduz um recorde antigo maior e que a mesma TAG continua identificando o participante.
+9. Validar em Android e iPhone reais, inclusive Safari deitado com barras presentes, rotação e opção de tela cheia quando disponível. Conferir se o processo voltou a ser supervisionado normalmente.
+10. Manter o backup e a revisão anterior conforme a política de retenção; registrar a atualização e a verificação sem divulgar dados de jogadores.
+
+Não é preciso criar outro subdomínio, abrir portas ou mudar o QR code existente se a URL pública continuar a mesma.
+
+## Reversão
+
+Se for necessário voltar, pare somente o jogo e restaure o código anterior. Como a migração é aditiva, o código anterior pode continuar usando suas tabelas originais; os novos dados permanecem guardados, embora a interface antiga não os apresente. Antes da reversão, faça um novo backup consistente para preservar também os resultados recebidos após a atualização.
+
+Restaure um banco anterior somente se houver necessidade comprovada: isso pode descartar resultados posteriores ao backup. Faça a operação com o processo parado, use um diretório de dados novo e ajuste DB_PATH de forma controlada. Nunca sobreponha um banco ativo nem misture WAL/SHM de cópias diferentes. Valide os registros antes de retomar.

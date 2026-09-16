@@ -1,4 +1,4 @@
-import { createState, DURATION_TICKS, generateCourse, MOVE_COOLDOWN_TICKS, stepState, TICK_RATE } from './shared/rules.js';
+import { createSurvivalState, stepSurvivalState, survivalSummary, MOVE_COOLDOWN_TICKS, TICK_RATE, VIEW_DISTANCE } from './shared/classic-survival.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -12,15 +12,16 @@ export class FreedomGame {
     this.onFinish = onFinish;
     this.onInterrupt = onInterrupt;
     this.soundEnabled = sound;
-    this.state = createState();
-    this.course = generateCourse(1);
+    this.state = createSurvivalState(1);
+    this.course = this.state.course;
+    this.moves = [];
     this.running = false;
     this.particles = [];
     this.visualLane = 1;
     this.flash = 0;
     this.resize = this.resize.bind(this);
     this.frame = this.frame.bind(this);
-    this.visibility = () => { if (document.hidden && this.running) this.interrupt(); };
+    this.visibility = () => { if (document.hidden && this.running) this.finish('hidden'); };
     this.keydown = event => {
       if (!this.running || event.repeat) return;
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); this.move(event.key === 'ArrowLeft' ? -1 : 1); }
@@ -57,11 +58,11 @@ export class FreedomGame {
 
   start({ seed, countdown = 3 }) {
     cancelAnimationFrame(this.raf);
-    this.course = generateCourse(seed);
-    this.state = createState();
+    this.state = createSurvivalState(seed);
+    this.course = this.state.course;
     this.moves = [];
     this.pendingDirection = 0;
-    this.lastMove = -MOVE_COOLDOWN_TICKS;
+    this.completed = false;
     this.particles = [];
     this.visualLane = 1;
     this.flash = 0;
@@ -79,22 +80,20 @@ export class FreedomGame {
 
   move(direction) {
     if (!this.running || this.countdown > 0 || this.pendingDirection || (direction !== -1 && direction !== 1)) return false;
-    if (this.state.tick - this.lastMove < MOVE_COOLDOWN_TICKS || this.state.lane + direction < 0 || this.state.lane + direction > 2) return false;
+    if (this.state.tick - this.state.lastMoveTick < MOVE_COOLDOWN_TICKS || this.state.lane + direction < 0 || this.state.lane + direction > 2) return false;
     this.pendingDirection = direction;
-    this.lastMove = this.state.tick;
-    this.moves.push({ tick: this.state.tick, direction });
     return true;
   }
 
   publish() {
-    this.onTick({ score: this.state.score, remaining: Math.ceil((DURATION_TICKS - this.state.tick) / TICK_RATE), coins: this.state.coins, hits: this.state.hits, combo: this.state.combo, terrain: this.state.tick < 1800 ? 'asfalto' : 'trilha' });
+    this.onTick(survivalSummary(this.state));
   }
 
   frame(now) {
     if (!this.running) return;
     const elapsed = now - this.previousTime;
     this.previousTime = now;
-    if (elapsed > 1500) { this.interrupt(); return; }
+    if (elapsed > 1500) { this.finish('interrupted'); return; }
     if (this.countdown > 0) {
       const remaining = Math.max(0, this.countdown - (now - this.countdownStart) / 1000);
       const number = Math.ceil(remaining);
@@ -106,30 +105,43 @@ export class FreedomGame {
     }
     this.accumulator += elapsed;
     const fixedStep = 1000 / TICK_RATE;
-    while (this.accumulator >= fixedStep && this.state.tick < DURATION_TICKS) {
+    while (this.accumulator >= fixedStep && !this.state.finished) {
       const previousScore = this.state.score;
-      stepState(this.state, this.course, this.pendingDirection);
+      if (this.pendingDirection && this.moves.length >= 1200) { this.finish('connection'); return; }
+      const applied = this.pendingDirection ? { tick: this.state.tick, direction: this.pendingDirection } : null;
+      stepSurvivalState(this.state, this.pendingDirection);
+      if (applied) this.moves.push(applied);
+      this.course = this.state.course;
       this.pendingDirection = 0;
       this.accumulator -= fixedStep;
       if (this.state.lastEvent) this.effect(this.state.lastEvent, this.state.score - previousScore);
       if (this.state.tick % 6 === 0 || this.state.lastEvent) this.publish();
     }
     this.render(Math.min(elapsed / 1000, 0.1));
-    if (this.state.tick >= DURATION_TICKS) {
-      this.running = false;
-      this.publish();
-      this.onFinish({ moves: this.moves.map(move => ({ ...move })), score: this.state.score, coins: this.state.coins, hits: this.state.hits });
-      return;
-    }
+    if (this.state.finished) { this.finish('lives'); return; }
     this.raf = requestAnimationFrame(this.frame);
   }
 
-  interrupt() {
-    if (!this.running) return;
-    this.running = false;
-    cancelAnimationFrame(this.raf);
-    this.onInterrupt();
+  snapshot(fromTick = 0) {
+    return { toTick: this.state.tick, inputs: this.moves.filter(move => move.tick >= fromTick && move.tick < this.state.tick).map(move => ({ ...move })) };
   }
+
+  acknowledge(tick) {
+    if (!Number.isInteger(tick) || tick < 0 || tick > this.state.tick) return;
+    this.moves = this.moves.filter(move => move.tick >= tick);
+  }
+
+  finish(reason = 'exit') {
+    if (this.completed || !this.running) return;
+    this.completed = true;
+    this.running = false;
+    this.pendingDirection = 0;
+    cancelAnimationFrame(this.raf);
+    this.publish();
+    this.onFinish({ ...survivalSummary(this.state), ...this.snapshot(), reason });
+  }
+
+  interrupt() { this.finish('interrupted'); }
 
   setSound(enabled) { this.soundEnabled = Boolean(enabled); if (enabled) this.ensureAudio(); }
   ensureAudio() {
@@ -152,7 +164,7 @@ export class FreedomGame {
     const position = this.project(0.94, this.visualLane);
     if (type === 'hit') { this.flash = 0.5; this.beep(110, 0.18, 0.06); }
     else this.beep(790 + this.state.combo * 120, 0.11, 0.055);
-    this.floating = { text: type === 'hit' ? '−80' : `+${points}`, type, life: 0.9 };
+    this.floating = { text: type === 'hit' ? '−1 VIDA' : `+${points}`, type, life: 0.9 };
     for (let i = 0; i < 12; i++) {
       const angle = i / 12 * TAU;
       this.particles.push({ x: position.x, y: position.y - 45, vx: Math.cos(angle) * (30 + Math.random() * 85), vy: Math.sin(angle) * 75 - 30, life: 0.6, color: type === 'hit' ? '#ff8752' : '#ffe76a' });
@@ -171,7 +183,7 @@ export class FreedomGame {
 
   project(depth, lane = 1) {
     const horizon = this.height * 0.265;
-    const curvature = Math.sin(this.state.tick / 490) * this.width * 0.19;
+    const curvature = Math.sin(this.state.distance / 490) * this.width * 0.19;
     const center = this.width / 2 + curvature * Math.pow(1 - Math.min(depth, 1), 2);
     const half = this.width * (0.026 + 0.58 * depth);
     return { x: center + (lane - 1) * half * 0.655, y: horizon + (this.height - horizon) * depth * depth, half, center };
@@ -204,7 +216,7 @@ export class FreedomGame {
     for (let i = 0; i < 35; i++) {
       const p0 = i / 35, p1 = (i + 1) / 35;
       const a = this.project(p0), b = this.project(p1);
-      const band = (Math.floor(this.state.tick / 12) + i) % 4 === 0;
+      const band = (Math.floor(this.state.distance / 12) + i) % 4 === 0;
       if (band) { ctx.fillStyle = blend < 0.5 ? '#87905238' : '#c5955730'; ctx.fillRect(0, a.y, w, b.y - a.y + 1); }
       this.polygon([[a.center - a.half * 1.13, a.y], [a.center + a.half * 1.13, a.y], [b.center + b.half * 1.13, b.y], [b.center - b.half * 1.13, b.y]], colorMix([165, 152, 94], [191, 151, 91], blend));
       this.polygon([[a.center - a.half, a.y], [a.center + a.half, a.y], [b.center + b.half, b.y], [b.center - b.half, b.y]], colorMix([47 + (band ? 3 : 0), 52 + (band ? 3 : 0), 53 + (band ? 3 : 0)], [154 + (band ? 4 : 0), 107 + (band ? 3 : 0), 59], blend));
@@ -212,7 +224,7 @@ export class FreedomGame {
         this.polygon([[a.center + side * a.half * 0.965, a.y], [a.center + side * a.half, a.y], [b.center + side * b.half, b.y], [b.center + side * b.half * 0.965, b.y]], band ? '#e8c840' : '#e8dfbb');
       }
     }
-    const dashOffset = (this.state.tick % 40) / 40;
+    const dashOffset = (this.state.distance % 40) / 40;
     for (let i = 0; i < 13; i++) {
       const p0 = (i + dashOffset) / 13, p1 = Math.min(1.06, p0 + 0.035);
       const a = this.project(p0), b = this.project(p1);
@@ -230,13 +242,16 @@ export class FreedomGame {
       ctx.globalAlpha = 1;
     }
     this.scenery();
-    const visible = this.course.filter(row => row.tick - this.state.tick <= 180 && row.tick - this.state.tick >= -14).sort((a, b) => b.tick - a.tick);
+    const visible = this.course.filter(row => row.distance - this.state.distance <= VIEW_DISTANCE && row.tick - this.state.tick >= -14).sort((a, b) => b.tick - a.tick);
     for (const row of visible) {
-      const p = 0.06 + (1 - (row.tick - this.state.tick) / 180) * 0.88;
+      const p = 0.06 + (1 - (row.distance - this.state.distance) / VIEW_DISTANCE) * 0.88;
       for (const obstacle of row.obstacles) this.obstacle(this.project(p, obstacle.lane), p, obstacle.type);
       if (row.tick >= this.state.tick) this.tire(this.project(p, row.coinLane), p, row.id);
     }
+    ctx.save();
+    if (this.state.tick < this.state.invulnerableUntil && Math.floor(this.state.tick / 6) % 2 === 0) ctx.globalAlpha = 0.45;
     this.motorcycle(delta, blend);
+    ctx.restore();
     for (const particle of this.particles) {
       particle.life -= delta; particle.x += particle.vx * delta; particle.y += particle.vy * delta; particle.vy += 170 * delta;
       ctx.globalAlpha = Math.max(0, particle.life / 0.6); ctx.fillStyle = particle.color; ctx.fillRect(particle.x, particle.y, 4, 4);
@@ -260,7 +275,7 @@ export class FreedomGame {
 
   hills() {
     const ctx = this.ctx, w = this.width, h = this.height;
-    const shift = Math.sin(this.state.tick / 700) * w * 0.02;
+    const shift = Math.sin(this.state.distance / 700) * w * 0.02;
     this.polygon([[-w * 0.1, h * 0.28], [-w * 0.1, h * 0.23], [w * 0.12 + shift, h * 0.145], [w * 0.22, h * 0.173], [w * 0.38, h * 0.14], [w * 0.53, h * 0.235], [w * 0.71, h * 0.185], [w * 0.85, h * 0.207], [w * 1.1, h * 0.16], [w * 1.1, h * 0.29]], '#53665d');
     this.polygon([[-20, h * 0.28], [-20, h * 0.245], [w * 0.09, h * 0.23], [w * 0.18, h * 0.205], [w * 0.29, h * 0.235], [w * 0.45, h * 0.241], [w * 0.55, h * 0.202], [w * 0.68, h * 0.24], [w * 0.88, h * 0.219], [w + 20, h * 0.237], [w + 20, h * 0.29]], '#3d5148');
     ctx.strokeStyle = '#dce6cf35'; ctx.lineWidth = 1;
@@ -270,7 +285,7 @@ export class FreedomGame {
   scenery() {
     const ctx = this.ctx;
     for (let i = 0; i < 12; i++) {
-      const depth = ((i / 12 + (this.state.tick % 280) / 280) % 1);
+      const depth = ((i / 12 + (this.state.distance % 280) / 280) % 1);
       if (depth < 0.04) continue;
       const position = this.project(depth);
       const side = i % 2 ? 1 : -1;
@@ -357,7 +372,7 @@ export class FreedomGame {
     this.ellipse(0, -23, 12, 26, '#080e0b');
     ctx.fillStyle = '#151e18'; ctx.fillRect(-11, -33, 22, 21);
     ctx.strokeStyle = '#384239'; ctx.lineWidth = 2.6;
-    const roll = (this.state.tick % 9) / 9;
+    const roll = (this.state.distance % 9) / 9;
     for (let i = 0; i < 7; i++) {
       const y = -45 + (i + roll) * 6;
       ctx.beginPath(); ctx.moveTo(-8, y - 1); ctx.lineTo(-2, y + 2); ctx.moveTo(8, y - 1); ctx.lineTo(2, y + 2); ctx.stroke();

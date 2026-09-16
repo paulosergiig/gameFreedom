@@ -4,8 +4,12 @@ import { FreestyleGame } from './freestyle.js';
 const $ = (selector) => document.querySelector(selector);
 const format = (value) => new Intl.NumberFormat('pt-BR').format(Number(value) || 0);
 const modeOf = (mode) => mode === 'freestyle' ? 'freestyle' : 'classic';
-const apiBase = (mode) => mode === 'freestyle' ? '/api/freestyle' : '/api';
+const apiBase = mode => `/api/survival/${modeOf(mode)}`;
+const PENDING_KEY = 'freedom-survival-pending-v1';
+let checkpointTimer, recoveryPromise;
+let recoveredSession = null;
 const state = { session: null, sessionPromise: null, game: null, activeRun: null, screen: 'home', selectedMode: 'classic', resultMode: 'classic', rankingMode: 'classic', opening: false, starting: false, savingName: false, finishing: false, pending: null, sound: false, tutorialSeen: { classic: false, freestyle: false }, rankingRequest: 0, toastTimer: 0 };
+const gasGestures = new Map();
 const heldPointers = new Map();
 const heldKeys = new Map();
 const pulseTimers = new Map();
@@ -14,15 +18,16 @@ const freestyleButtons = [['#freestyle-gas', 1], ['#freestyle-brake', 2], ['#fre
 class ApiError extends Error {
   constructor(message, code, status) { super(message); this.code = code; this.status = status; }
 }
-async function request(path, { method = 'GET', body, csrf = true, timeout = 15000 } = {}) {
+async function request(path, { method = 'GET', body, csrf = true, timeout = 15000, keepalive = false } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
     const headers = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (method !== 'GET' && csrf && state.session) headers['X-CSRF-Token'] = state.session.csrfToken;
-    const response = await fetch(path, { method, headers, credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    const response = await fetch(path, { method, headers, credentials: 'same-origin', cache: 'no-store', keepalive, signal: controller.signal, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const data = await response.json().catch(() => ({}));
+    if (!response.ok && ['SESSION_EXPIRED', 'CSRF'].includes(data.code)) { state.session = null; recoveredSession = null; }
     if (!response.ok) throw new ApiError(data.error || 'Não conseguimos concluir agora. Tente novamente.', data.code, response.status);
     return data;
   } catch (error) {
@@ -77,6 +82,10 @@ async function play(mode = 'classic') {
   const buttons = document.querySelectorAll('[data-action="play"], [data-action="play-freestyle"]');
   buttons.forEach((button) => { button.disabled = true; });
   try {
+    await ensureSession();
+    await recoveryPromise;
+    await recoverPending();
+    if (state.pending) { closeDialogs(); showScreen('result'); submitResult(); return; }
     const session = await ensureSession();
     closeDialogs();
     if (!session.player) {
@@ -143,26 +152,24 @@ async function startRun(mode = state.selectedMode) {
     await ensureSession();
     const run = await request(`${apiBase(mode)}/runs`, { method: 'POST', body: {} });
     state.pending = null;
-    state.activeRun = { ...run, mode };
+    state.activeRun = { ...run, mode, ackTick: 0, lastAckAt: Date.now(), syncing: false };
     state.tutorialSeen[mode] = true;
     closeDialogs();
     $('#toast').hidden = true;
     showScreen(freestyle ? 'freestyle' : 'game', false);
     clearFreestyleControls();
     state.game?.destroy();
-    const callbacks = { sound: state.sound, onTick: freestyle ? updateFreestyleHud : updateHud, onFinish: finishRun, onInterrupt: (event) => interruptRun(event?.reason === 'input-limit' ? 'Esta partida chegou ao limite de comandos. Segure os botões para controlar a moto e comece uma nova tentativa.' : 'Ao sair da tela ou interromper o navegador, a partida é encerrada. Essa tentativa não entra no ranking.') };
+    const callbacks = { sound: state.sound, onTick: freestyle ? updateFreestyleHud : updateHud, onFinish: finishRun, onInterrupt: () => state.game?.finish('interrupted') };
     if (freestyle) {
-      updateFreestyleHud({ score: 0, pending: 0, remaining: run.duration || 90, combo: 1, airborne: false });
+      updateFreestyleHud({ score: 0, pending: 0, elapsed: 0, lives: 3, level: 1, combo: 1 });
       state.game = new FreestyleGame($('#freestyle-canvas'), callbacks);
     } else {
-      $('#hud-score').textContent = '0';
-      updateTime(run.duration || 60);
-      $('#hud-combo').hidden = true;
-      $('#hud-terrain').textContent = 'ASFALTO';
+      updateHud({ score: 0, elapsed: 0, lives: 3, level: 1, combo: 1 });
       state.game = new FreedomGame($('#game-canvas'), callbacks);
     }
     updateSoundButtons();
     state.game.start({ seed: run.seed, countdown: run.countdown ?? 3 });
+    startCheckpoints();
   } catch (error) {
     if (state.activeRun) {
       const failed = state.activeRun;
@@ -170,7 +177,8 @@ async function startRun(mode = state.selectedMode) {
       clearFreestyleControls();
       state.game?.destroy();
       state.game = null;
-      request(`${apiBase(failed.mode)}/runs/${encodeURIComponent(failed.runId)}/abandon`, { method: 'POST', body: {} }).catch(() => {});
+      clearInterval(checkpointTimer);
+      request(`${apiBase(failed.mode)}/runs/${encodeURIComponent(failed.runId)}/sync`, { method: 'POST', body: { version: failed.version, fromTick: 0, toTick: 0, inputs: [], end: true, reason: 'exit' } }).catch(() => {});
       showScreen('home');
     }
     if (tutorial.open) startError.textContent = error.message;
@@ -181,47 +189,107 @@ async function startRun(mode = state.selectedMode) {
     startButton.removeAttribute('aria-busy');
   }
 }
-function updateTime(remaining) {
-  const time = $('#hud-time');
-  time.replaceChildren(document.createTextNode(String(Math.max(0, Math.ceil(remaining)))));
-  const suffix = document.createElement('span'); suffix.textContent = 's'; time.append(suffix);
-  time.parentElement.classList.toggle('is-urgent', remaining <= 10);
+function elapsedLabel(seconds = 0) {
+  const total = Math.max(0, Math.floor(seconds));
+  return total < 60 ? total + 's' : Math.floor(total / 60) + ':' + String(total % 60).padStart(2, '0');
 }
-function updateHud({ score, remaining, combo, terrain }) {
+function updateLives(selector, lives = 3) {
+  const value = Math.max(0, Math.min(3, lives));
+  const node = $(selector);
+  node.textContent = '♥'.repeat(value) + '♡'.repeat(3 - value);
+  node.setAttribute('aria-label', value + (value === 1 ? ' vida' : ' vidas'));
+  node.classList.toggle('last-life', value === 1);
+}
+function updateHud({ score, elapsed, combo, lives, level }) {
   $('#hud-score').textContent = format(score);
-  updateTime(remaining);
-  $('#hud-terrain').textContent = terrain === 'trilha' ? 'TRILHA' : 'ASFALTO';
+  $('#hud-time').textContent = elapsedLabel(elapsed);
+  $('#hud-terrain').textContent = 'NÍVEL ' + (level || 1);
+  updateLives('#classic-lives', lives);
   $('#hud-combo').hidden = !(combo > 1);
-  $('#hud-combo').textContent = `COMBO ×${combo || 1}`;
+  $('#hud-combo').textContent = 'COMBO ×' + (combo || 1);
 }
-function updateFreestyleHud({ score, pending, remaining, combo, airborne }) {
+function updateFreestyleHud({ score, pending, elapsed, combo, airborne, lives, level }) {
   $('#freestyle-score').textContent = format(score);
-  $('#freestyle-time').textContent = `${Math.max(0, Math.ceil(remaining))}s`;
-  $('#freestyle-time').parentElement.classList.toggle('is-urgent', remaining <= 10);
+  $('#freestyle-time').textContent = elapsedLabel(elapsed);
+  $('#freestyle-level').textContent = 'NÍVEL ' + (level || 1);
+  updateLives('#freestyle-lives', lives);
   $('#freestyle-flight-hud').hidden = !(pending > 0);
-  $('#freestyle-pending').textContent = `+${format(pending)}`;
-  $('#freestyle-combo').textContent = `COMBO ×${Math.max(1, combo || 1)}`;
+  $('#freestyle-pending').textContent = '+' + format(pending);
+  $('#freestyle-combo').textContent = 'COMBO ×' + Math.max(1, combo || 1);
   $('#freestyle-flight-hud').classList.toggle('is-airborne', Boolean(airborne));
+}
+function pendingSnapshot(run, reason = 'exit') {
+  const snapshot = state.game.snapshot(run.ackTick);
+  return { runId: run.runId, mode: run.mode, tag: state.session?.player?.tag,
+    body: { version: run.version, fromTick: run.ackTick, ...snapshot, end: true, reason } };
+}
+function storePending(pending) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch { /* Server checkpoints also protect private browsing sessions. */ }
+}
+function clearPending(runId) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PENDING_KEY));
+    if (saved?.runId === runId) localStorage.removeItem(PENDING_KEY);
+  } catch { /* Storage is optional. */ }
+}
+function syncPath(pending) { return apiBase(pending.mode) + '/runs/' + encodeURIComponent(pending.runId) + '/sync'; }
+function startCheckpoints() {
+  clearInterval(checkpointTimer);
+  let count = 0;
+  storePending(pendingSnapshot(state.activeRun));
+  checkpointTimer = setInterval(() => {
+    const run = state.activeRun;
+    if (!run || !state.game) return;
+    storePending(pendingSnapshot(run));
+    if (Date.now() - run.lastAckAt > 20000) { state.game.finish('connection'); return; }
+    if (++count % 5 === 0) syncProgress(run);
+  }, 1000);
+}
+async function syncProgress(run) {
+  if (run.syncing || state.activeRun !== run) return;
+  run.syncing = true;
+  const pending = pendingSnapshot(run);
+  try {
+    const response = await request(syncPath(pending), { method: 'POST', body: { ...pending.body, end: false }, timeout: 10000 });
+    if (state.activeRun !== run) return;
+    run.ackTick = Math.max(run.ackTick, response.tick);
+    run.lastAckAt = Date.now();
+    state.game.acknowledge(response.tick);
+    storePending(pendingSnapshot(run));
+    if (response.finished) state.game.finish('connection');
+  } catch { /* Retry on the next heartbeat; finish after a prolonged outage. */ }
+  finally { run.syncing = false; }
+}
+function beaconPending(pending) {
+  if (!pending || !state.session?.csrfToken) return;
+  const json = JSON.stringify({ ...pending.body, csrfToken: state.session.csrfToken });
+  try { navigator.sendBeacon?.(syncPath(pending), new Blob([json], { type: 'application/json' })); } catch { /* The stored snapshot is retried on return. */ }
+}
+function prepareResult(pending) {
+  state.resultMode = pending.mode;
+  const freestyle = pending.mode === 'freestyle';
+  $('#result-player').textContent = state.session?.player?.name || 'Piloto';
+  $('#result-mode-label').textContent = freestyle ? 'FREEDOM FREESTYLE · 3 VIDAS' : 'DESAFIO FREEDOM · 3 VIDAS';
+  $('#result-extra-label').textContent = freestyle ? 'MANOBRAS' : 'COLETAS';
+  $('#result-score').textContent = '—';
+  $('#result-stats').hidden = true;
+  $('#result-eyebrow').textContent = pending.body.reason === 'lives' ? 'TRÊS VIDAS. UMA BOA HISTÓRIA.' : 'VOCÊ FEZ SEU CAMINHO.';
+  $('#result-status').classList.remove('success');
+  closeDialogs();
+  showScreen('result');
 }
 function finishRun(result) {
   if (!state.activeRun) return;
   const run = state.activeRun;
+  state.pending = pendingSnapshot(run, result.reason || 'exit');
+  storePending(state.pending);
+  clearInterval(checkpointTimer);
   state.activeRun = null;
   clearFreestyleControls();
   state.game?.destroy();
   state.game = null;
-  state.resultMode = run.mode;
-  const freestyle = run.mode === 'freestyle';
-  const inputKey = freestyle ? 'inputs' : 'moves';
-  state.pending = { runId: run.runId, mode: run.mode, body: { [inputKey]: JSON.parse(JSON.stringify(result[inputKey])), version: run.version || (freestyle ? 'freestyle-1' : '1') } };
-  $('#result-player').textContent = state.session?.player?.name || 'Piloto';
-  $('#result-mode-label').textContent = freestyle ? 'FREEDOM FREESTYLE · 90 SEGUNDOS' : 'DESAFIO FREEDOM · 60 SEGUNDOS';
-  $('#result-extra-label').textContent = freestyle ? 'MANOBRAS' : 'COLETAS';
-  $('#result-score').textContent = '—';
-  $('#result-stats').hidden = true;
-  $('#result-eyebrow').textContent = freestyle ? 'VOCÊ LEVOU A LIBERDADE MAIS ALTO.' : 'VOCÊ FEZ SEU CAMINHO.';
-  $('#result-status').classList.remove('success');
-  showScreen('result');
+  prepareResult(state.pending);
+  if (document.hidden || ['hidden', 'pagehide'].includes(result.reason)) beaconPending(state.pending);
   submitResult();
 }
 async function submitResult() {
@@ -233,42 +301,50 @@ async function submitResult() {
   $('#result-status').textContent = 'Confirmando sua pontuação na pista…';
   $('#play-again').disabled = true;
   try {
-    const result = await request(`${apiBase(pending.mode)}/runs/${encodeURIComponent(pending.runId)}/finish`, { method: 'POST', body: pending.body });
+    const response = await request(syncPath(pending), { method: 'POST', body: pending.body, keepalive: true });
     if (state.pending !== pending) return;
+    if (!response.finished || !response.result) throw new ApiError('Sua partida ainda está sendo confirmada. Tente novamente.', 'PENDING', 0);
+    const result = response.result;
     state.pending = null;
+    clearPending(pending.runId);
     $('#result-score').textContent = format(result.score);
-    $('#result-rank').textContent = result.rank ? `${result.rank}º` : '—';
+    $('#result-rank').textContent = result.rank ? result.rank + 'º' : '—';
     $('#result-best').textContent = format(result.best);
     $('#result-coins').textContent = format(pending.mode === 'freestyle' ? result.tricks : result.coins);
     $('#result-stats').hidden = false;
-    $('#result-status').textContent = result.isRecord ? 'Novo recorde da pista. O topo agora é seu!' : result.isPersonalBest ? 'Seu novo recorde pessoal. Boa pilotagem!' : 'Pontuação confirmada. A próxima pode ser ainda melhor.';
+    const disconnected = result.endReason === 'disconnect' || result.elapsedTicks < pending.body.toTick;
+    $('#result-status').textContent = result.elapsedTicks === 0 ? 'Você saiu antes da largada. Pronto para tentar de novo?' : disconnected ? 'Conexão interrompida. O último progresso confirmado foi salvo no ranking.' : result.isRecord ? 'Novo recorde da pista. O topo agora é seu!' : result.isPersonalBest ? 'Seu novo recorde pessoal. Boa pilotagem!' : 'Pontuação confirmada. A próxima pode ser ainda melhor.';
     $('#result-status').classList.add('success');
     if (result.isRecord) $('#result-eyebrow').textContent = 'TEM UM NOVO LÍDER NA PISTA.';
     else if (result.isPersonalBest) $('#result-eyebrow').textContent = 'VOCÊ ACABOU DE SE SUPERAR.';
-    if (state.session?.player && pending.mode === 'classic') {
-      state.session.player.best = result.best;
-      state.session.player.rank = result.rank;
-    }
   } catch (error) {
-    $('#result-status').textContent = `${error.message} Sua pontuação ainda não foi confirmada.`;
+    $('#result-status').textContent = error.message + ' Sua pontuação ainda não foi confirmada.';
     $('#retry-result').hidden = false;
+    if (['RUN_NOT_FOUND', 'NAME_REQUIRED', 'CSRF', 'SESSION_EXPIRED'].includes(error.code)) {
+      // A missing/expired identity cannot reclaim a different participant's run.
+      state.pending = null;
+      if (error.code !== 'RUN_NOT_FOUND') { state.session = null; recoveredSession = null; }
+      clearPending(pending.runId);
+      $('#retry-result').hidden = true;
+      $('#result-status').textContent = 'Esta partida expirou ou pertence a outra identificação. Você pode começar uma nova.';
+    }
   } finally {
     state.finishing = false;
     $('#play-again').disabled = false;
   }
 }
-function interruptRun(message) {
-  if (!state.activeRun) return;
-  const run = state.activeRun;
-  state.selectedMode = run.mode;
-  state.activeRun = null;
-  clearFreestyleControls();
-  state.game?.destroy();
-  state.game = null;
-  request(`${apiBase(run.mode)}/runs/${encodeURIComponent(run.runId)}/abandon`, { method: 'POST', body: {} }).catch(() => {});
-  $('#interrupt-copy').textContent = message;
-  showDialog('#interrupt-dialog');
+async function recoverPending() {
+  if (!state.session || recoveredSession === state.session || state.activeRun || state.pending) return;
+  recoveredSession = state.session;
+  let pending;
+  try { pending = JSON.parse(localStorage.getItem(PENDING_KEY)); } catch { return; }
+  if (!pending || !['classic', 'freestyle'].includes(pending.mode) || !pending.runId || !pending.body || pending.tag !== state.session?.player?.tag) return;
+  state.pending = pending;
+  pending.body.end = true;
+  prepareResult(pending);
+  await submitResult();
 }
+function interruptRun() { state.game?.finish('exit'); }
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -378,6 +454,7 @@ function applyFreestyleControls() {
   if (state.activeRun?.mode === 'freestyle') state.game?.setControls?.(mask);
 }
 function clearFreestyleControls() {
+  gasGestures.clear();
   heldPointers.clear();
   heldKeys.clear();
   for (const timer of pulseTimers.values()) clearTimeout(timer);
@@ -385,6 +462,7 @@ function clearFreestyleControls() {
   applyFreestyleControls();
 }
 function releasePointer(event) {
+  gasGestures.delete(event.pointerId);
   if (heldPointers.delete(event.pointerId)) applyFreestyleControls();
 }
 for (const [selector, mask] of freestyleButtons) {
@@ -393,6 +471,7 @@ for (const [selector, mask] of freestyleButtons) {
     if (state.activeRun?.mode !== 'freestyle' || (event.pointerType === 'mouse' && event.button !== 0)) return;
     event.preventDefault();
     heldPointers.set(event.pointerId, mask);
+    if (mask === 1) gasGestures.set(event.pointerId, { x: event.clientX, y: event.clientY, armed: true });
     try { button.setPointerCapture(event.pointerId); } catch { /* Window pointerup remains a fallback. */ }
     applyFreestyleControls();
   });
@@ -420,6 +499,22 @@ for (const [selector, mask] of freestyleButtons) {
     pulseTimers.set(key, setTimeout(() => { pulseTimers.delete(key); heldPointers.delete(key); applyFreestyleControls(); }, 350));
   });
 }
+$('#freestyle-gas').addEventListener('pointermove', event => {
+  const gesture = gasGestures.get(event.pointerId);
+  if (!gesture || state.activeRun?.mode !== 'freestyle') return;
+  event.preventDefault();
+  const upward = gesture.y - event.clientY;
+  if (gesture.armed && upward >= 30 && upward > Math.abs(event.clientX - gesture.x)) {
+    state.game?.jump(); gesture.armed = false;
+  } else if (!gesture.armed && upward < 12) gesture.armed = true;
+});
+$('#freestyle-jump').addEventListener('pointerdown', event => {
+  event.preventDefault();
+  if (state.activeRun?.mode === 'freestyle') state.game?.jump();
+});
+$('#freestyle-jump').addEventListener('click', event => {
+  if (event.detail === 0 && state.activeRun?.mode === 'freestyle') state.game?.jump();
+});
 window.addEventListener('pointerup', releasePointer);
 window.addEventListener('pointercancel', releasePointer);
 window.addEventListener('keyup', (event) => {
@@ -456,7 +551,7 @@ $('#start-run').addEventListener('click', () => startRun('classic'));
 $('#start-freestyle').addEventListener('click', () => startRun('freestyle'));
 $('#refresh-ranking').addEventListener('click', loadRanking);
 $('#retry-result').addEventListener('click', submitResult);
-for (const selector of ['#exit-game', '#exit-freestyle']) $(selector).addEventListener('click', () => interruptRun('Você saiu desta partida. Essa tentativa não entra no ranking, mas uma nova pista está esperando.'));
+for (const selector of ['#exit-game', '#exit-freestyle']) $(selector).addEventListener('click', () => interruptRun());
 for (const selector of ['#sound-button', '#freestyle-sound-button']) $(selector).addEventListener('click', () => {
   state.sound = !state.sound;
   state.game?.setSound(state.sound);
@@ -467,15 +562,33 @@ for (const [selector, direction] of [['#steer-left', -1], ['#steer-right', 1]]) 
   button.addEventListener('pointerdown', (event) => { event.preventDefault(); if (state.activeRun?.mode === 'classic') state.game?.move(direction); });
   button.addEventListener('click', (event) => { if (event.detail === 0 && state.activeRun?.mode === 'classic') state.game?.move(direction); });
 }
-$('#restart-interrupted').addEventListener('click', () => { $('#interrupt-dialog').close(); showScreen('home'); play(state.selectedMode); });
-$('#leave-interrupted').addEventListener('click', () => { $('#interrupt-dialog').close(); showScreen('home'); });
-$('#interrupt-dialog').addEventListener('cancel', () => { showScreen('home'); });
+function updateViewport() {
+  const viewport = window.visualViewport;
+  document.documentElement.style.setProperty('--play-height', (viewport?.height || innerHeight) + 'px');
+}
+window.addEventListener('resize', updateViewport);
+window.visualViewport?.addEventListener('resize', updateViewport);
+updateViewport();
+for (const selector of ['#classic-fullscreen', '#freestyle-fullscreen']) $(selector).addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) { await document.exitFullscreen(); return; }
+    if (!document.fullscreenEnabled || !document.documentElement.requestFullscreen) throw new Error('unsupported');
+    await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+  } catch {
+    toast('No Safari: Compartilhar → Adicionar à Tela de Início para abrir com mais espaço. Você também pode jogar em pé.');
+  }
+  updateViewport();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) state.game?.finish('hidden');
+  else if (state.pending) submitResult();
+});
 window.addEventListener('pagehide', () => {
-  clearFreestyleControls();
-  if (state.activeRun) { state.game?.destroy(); state.activeRun = null; state.game = null; }
+  state.game?.finish('pagehide');
+  if (state.pending) beaconPending(state.pending);
 });
-window.addEventListener('pageshow', (event) => {
-  if (event.persisted && ['game', 'freestyle'].includes(state.screen) && !state.activeRun) { closeDialogs(); showScreen('home'); toast('A partida foi interrompida. Você pode começar uma nova.'); }
+window.addEventListener('pageshow', event => {
+  updateViewport();
+  if (event.persisted && state.pending) submitResult();
 });
-ensureSession().catch(() => { /* The player can retry when starting or opening the ranking. */ });
-
+recoveryPromise = ensureSession().then(recoverPending).catch(() => { /* Starting or opening the ranking retries connectivity. */ });

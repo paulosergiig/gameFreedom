@@ -18,20 +18,26 @@ Se a porta 3000 estiver ocupada, copie `.env.example` para `.env` e ajuste PORT 
 
 ## Escolher seu desafio
 
-**Desafio Freedom:** o jogo original, com 60 segundos, três faixas, asfalto e trilha. Toque nas setas para desviar e coletar pneus dourados.
+A página inicial apresenta os dois jogos com acesso direto. Ambos têm **três vidas** e continuam enquanto houver vidas. O tempo exibido é o tempo sobrevivido, sem contagem regressiva de 60 ou 90 segundos.
 
-**Freedom Freestyle:** 90 segundos em visão lateral, com rampas, obstáculos e manobras. Priorize o celular deitado. Segure acelerar ou frear com o polegar direito e incline a moto com o esquerdo. A moto salta ao sair das rampas; giros completos e boas aterrissagens dão pontos. Pontos no ar só são confirmados ao pousar. Quedas perdem o combo e os pontos pendentes, preservam o total confirmado e retomam perto da ação; o relógio continua.
+**Desafio Freedom:** três faixas, asfalto e trilha. Desvie dos obstáculos e colete pneus dourados. Cada colisão consome uma vida; velocidade e dificuldade aumentam progressivamente. Há um breve intervalo de proteção após a batida para evitar acidentes consecutivos sem oportunidade de reação.
 
-No computador, o Freestyle usa ↑ para acelerar, ↓ para frear e ←/→ para inclinar. O Desafio original continua usando ←/→ para mudar de faixa.
+**Freedom Freestyle:** visão lateral, rampas, troncos, pedras e manobras. Segure acelerar ou frear e incline a moto. Para saltar, mantenha o acelerador pressionado e arraste o dedo para cima, ou use o botão de salto. As rampas também lançam a moto. Cada queda consome uma vida; a terceira encerra a tentativa. Pontos no ar só são confirmados ao pousar. A dificuldade aumenta com a progressão.
+
+No computador, o Desafio usa ←/→ para mudar de faixa. No Freestyle, W acelera, ↓ ou S freiam, ←/→ inclinam e Espaço ou ↑ saltam.
+
+A área de jogo se adapta ao espaço visível do navegador. No iPhone, a experiência funciona com as barras do Safari presentes, em pé ou deitado. Tela cheia é uma opção quando suportada; não é requisito para jogar.
 
 ## Participação e ranking
 
-- Escolha um apelido de 2 a 20 caracteres.
-- Escolha um dos dois modos na página inicial.
-- Consulte as instruções do modo antes da primeira tentativa.
-- Mantenha a página aberta durante a partida. Ao trocar de aplicativo, a tentativa é interrompida.
-- O servidor reconstitui a partida e confirma a pontuação. Seu melhor resultado aparece no ranking daquele modo. As pontuações dos dois jogos não são somadas.
-- Se o envio falhar, use o botão de tentar salvar novamente enquanto a partida ainda estiver válida.
+- Escolha um apelido de 2 a 20 caracteres e um dos dois jogos.
+- Consulte as instruções antes da primeira tentativa.
+- Ao acabar a terceira vida ou encerrar a partida, o resultado confirmado entra no ranking daquele modo. Pontos dos jogos não são somados.
+- A página confirma o progresso com o servidor periodicamente e tenta enviar o trecho final ao sair ou trocar de aplicativo.
+- Se o sistema fechar o navegador sem permitir o último envio, o servidor encerra a tentativa após 30 segundos sem confirmação e preserva o último trecho recebido. Os segundos ainda não enviados podem se perder.
+- Quando houver erro de envio, use a opção de tentar salvar novamente; a interface só confirma o registro depois da resposta do servidor.
+
+Os recordes anteriores e os novos aparecem juntos no ranking de cada jogo, conforme decisão do usuário. Vale a maior pontuação de cada participante entre as duas versões; os dados antigos são preservados e um resultado menor nunca os substitui. O apelido e a sessão continuam os mesmos.
 
 A identidade é daquele navegador. Não existe comprovação de pessoa única e não há proteção absoluta contra automação.
 
@@ -50,6 +56,7 @@ Os testes de navegador usam servidor e banco em memória próprios na porta 3917
 
 - [Publicar no Windows Server com Cloudflare Tunnel](docs/PUBLICACAO-WINDOWS.md)
 - [Moderação, backup e privacidade](docs/OPERACAO.md)
+- [Decisões da melhoria com três vidas](planejamento-local/10-melhorias-sobrevivencia.md)
 - [Recursos visuais e origem da arte](docs/ASSETS.md)
 
 Para gerar QR code **depois de definir e publicar a URL real**:

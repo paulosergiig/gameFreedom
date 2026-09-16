@@ -1,4 +1,4 @@
-import { BIKE_RADIUS, createFreestyleState, FREESTYLE_DURATION_TICKS, FREESTYLE_MAX_INPUTS, FREESTYLE_TICK_RATE, freestyleGround, generateFreestyleCourse, stepFreestyleState } from './shared/freestyle-rules.js';
+import { BIKE_RADIUS, createSurvivalState, stepSurvivalState, survivalSummary, FREESTYLE_TICK_RATE, freestyleGround } from './shared/freestyle-survival.js';
 
 const TAU = Math.PI * 2;
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
@@ -8,12 +8,12 @@ export class FreestyleGame {
   constructor(canvas, { sound = false, onTick = () => {}, onFinish = () => {}, onInterrupt = () => {} } = {}) {
     this.canvas = canvas; this.ctx = canvas.getContext('2d', { alpha: false });
     this.onTick = onTick; this.onFinish = onFinish; this.onInterrupt = onInterrupt; this.soundEnabled = sound;
-    this.state = createFreestyleState(); this.course = generateFreestyleCourse(1); this.seed = 1;
+    this.state = createSurvivalState(1); this.course = this.state.course; this.inputs = []; this.seed = 1;
     this.running = false; this.touchMask = 0; this.keyMask = 0; this.particles = []; this.notices = []; this.flash = 0;
     this.frame = this.frame.bind(this); this.resize = this.resize.bind(this);
-    this.visibility = () => { if (document.hidden && this.running) this.interrupt(); };
+    this.visibility = () => { if (document.hidden && this.running) this.finish('hidden'); };
     this.keydown = event => this.key(event, true); this.keyup = event => this.key(event, false);
-    this.blur = () => { this.keyMask = 0; this.touchMask = 0; };
+    this.blur = () => { this.keyMask = 0; this.touchMask = 0; this.jumpQueued = false; };
     document.addEventListener('visibilitychange', this.visibility);
     window.addEventListener('keydown', this.keydown); window.addEventListener('keyup', this.keyup); window.addEventListener('blur', this.blur);
     this.observer = new ResizeObserver(this.resize); this.observer.observe(canvas);
@@ -25,26 +25,31 @@ export class FreestyleGame {
     this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0); if (!this.running) this.render(0);
   }
   start({ seed, countdown = 3 }) {
-    cancelAnimationFrame(this.raf); this.course = generateFreestyleCourse(seed); this.state = createFreestyleState(); this.seed = seed;
-    this.inputs = []; this.touchMask = 0; this.keyMask = 0; this.particles = []; this.notices = []; this.flash = 0;
+    cancelAnimationFrame(this.raf); this.state = createSurvivalState(seed); this.course = this.state.course; this.seed = seed;
+    this.inputs = []; this.completed = false; this.jumpQueued = false; this.touchMask = 0; this.keyMask = 0; this.particles = []; this.notices = []; this.flash = 0;
     this.running = true; this.countdown = Math.max(0, countdown); this.startTime = performance.now(); this.previousTime = this.startTime; this.accumulator = 0; this.countSound = -1;
     this.ensureAudio(); this.publish(); this.raf = requestAnimationFrame(this.frame);
   }
   key(event, down) {
-    const bit = { ArrowUp: 1, ArrowDown: 2, ArrowLeft: 4, ArrowRight: 8 }[event.key];
-    if (!bit || !this.running || /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName ?? '')) return;
+    if (event.defaultPrevented || !this.running || /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName ?? '')) return;
+    if (event.code === 'Space' || event.key === 'ArrowUp') {
+      event.preventDefault(); if (down && !event.repeat) this.jump(); return;
+    }
+    const bit = { w: 1, W: 1, s: 2, S: 2, ArrowDown: 2, ArrowLeft: 4, ArrowRight: 8 }[event.key];
+    if (!bit) return;
     event.preventDefault(); this.keyMask = down ? this.keyMask | bit : this.keyMask & ~bit;
   }
   setControls(mask) { if (Number.isInteger(mask) && mask >= 0 && mask <= 15) this.touchMask = mask; }
-  setSound(enabled) { this.soundEnabled = Boolean(enabled); if (enabled) this.ensureAudio(); }
-  publish() {
-    const s = this.state;
-    this.onTick({ score: s.score, pending: s.pending, remaining: Math.ceil((FREESTYLE_DURATION_TICKS - s.tick) / FREESTYLE_TICK_RATE), combo: s.combo, tricks: s.tricks, crashes: s.crashes, speed: Math.round(s.vx * 12), airborne: s.airborne && s.respawnTicks === 0 });
+  jump() {
+    if (!this.running || this.countdown > 0 || this.jumpQueued) return false;
+    this.jumpQueued = true; return true;
   }
+  setSound(enabled) { this.soundEnabled = Boolean(enabled); if (enabled) this.ensureAudio(); }
+  publish() { this.onTick(survivalSummary(this.state)); }
   frame(now) {
     if (!this.running) return;
     const elapsed = now - this.previousTime; this.previousTime = now;
-    if (elapsed > 1500) { this.interrupt(); return; }
+    if (elapsed > 1500) { this.finish('interrupted'); return; }
     if (this.countdown > 0) {
       const left = Math.max(0, this.countdown - (now - this.startTime) / 1000), number = Math.ceil(left);
       if (number !== this.countSound) { this.beep(number ? 400 : 800, 0.1); this.countSound = number; }
@@ -53,25 +58,36 @@ export class FreestyleGame {
       this.raf = requestAnimationFrame(this.frame); return;
     }
     this.accumulator += elapsed;
-    while (this.accumulator >= 1000 / FREESTYLE_TICK_RATE && this.state.tick < FREESTYLE_DURATION_TICKS) {
-      let mask = this.touchMask | this.keyMask;
+    while (this.accumulator >= 1000 / FREESTYLE_TICK_RATE && !this.state.finished) {
+      const mask = this.touchMask | this.keyMask | (this.jumpQueued ? 16 : 0);
       if (mask !== this.state.buttons) {
-        if (this.inputs.length < FREESTYLE_MAX_INPUTS) this.inputs.push({ tick: this.state.tick, buttons: mask });
-        else { this.interrupt('input-limit'); return; }
+        if (this.inputs.length < 1200) this.inputs.push({ tick: this.state.tick, buttons: mask });
+        else { this.finish('connection'); return; }
       }
-      stepFreestyleState(this.state, this.course, mask);
+      stepSurvivalState(this.state, mask);
+      this.course = this.state.course; this.jumpQueued = false;
       if (this.state.lastEvent) this.effect(this.state.lastEvent);
       if (this.state.tick % 6 === 0 || this.state.lastEvent) this.publish();
       this.accumulator -= 1000 / FREESTYLE_TICK_RATE;
     }
     this.render(Math.min(0.08, elapsed / 1000));
-    if (this.state.tick >= FREESTYLE_DURATION_TICKS) {
-      this.running = false; this.touchMask = 0; this.keyMask = 0; this.publish();
-      this.onFinish({ inputs: this.inputs.map(input => ({ ...input })), score: this.state.score, tricks: this.state.tricks, crashes: this.state.crashes, jumps: this.state.jumps }); return;
-    }
+    if (this.state.finished) { this.finish('lives'); return; }
     this.raf = requestAnimationFrame(this.frame);
   }
-  interrupt(reason = 'interrupted') { if (!this.running) return; this.running = false; this.touchMask = 0; this.keyMask = 0; cancelAnimationFrame(this.raf); this.onInterrupt({ reason }); }
+  snapshot(fromTick = 0) {
+    return { toTick: this.state.tick, inputs: this.inputs.filter(input => input.tick >= fromTick && input.tick < this.state.tick).map(input => ({ ...input })) };
+  }
+  acknowledge(tick) {
+    if (!Number.isInteger(tick) || tick < 0 || tick > this.state.tick) return;
+    this.inputs = this.inputs.filter(input => input.tick >= tick);
+  }
+  finish(reason = 'exit') {
+    if (this.completed || !this.running) return;
+    this.completed = true; this.running = false; this.touchMask = 0; this.keyMask = 0; this.jumpQueued = false;
+    cancelAnimationFrame(this.raf); this.publish();
+    this.onFinish({ ...survivalSummary(this.state), ...this.snapshot(), reason });
+  }
+  interrupt(reason = 'interrupted') { this.finish(reason); }
   destroy() {
     this.running = false; cancelAnimationFrame(this.raf); this.observer.disconnect();
     document.removeEventListener('visibilitychange', this.visibility); window.removeEventListener('keydown', this.keydown); window.removeEventListener('keyup', this.keyup); window.removeEventListener('blur', this.blur);
@@ -90,8 +106,8 @@ export class FreestyleGame {
   }
   effect(event) {
     if (event.type === 'flip') { this.notices.push({ text: event.direction === 'back' ? 'BACKFLIP 360°' : 'FRONTFLIP 360°', sub: 'Solte a inclinação para alinhar', color: '#ffe55e', life: 1.4 }); this.beep(850); }
-    if (event.type === 'land') { this.notices.push({ text: `+${event.banked.toLocaleString('pt-BR')}`, sub: event.flips ? 'POUSO PERFEITO!' : 'SALTO LIMPO!', color: '#dbffbb', life: 1.1 }); this.beep(event.flips ? 1100 : 570, 0.11); this.burst(10, '#cfaa68'); }
-    if (event.type === 'crash') { this.flash = 0.5; this.notices.push({ text: 'LEVANTA A POEIRA!', sub: 'Pontos do salto perdidos. Vamos de novo!', color: '#ffc5a2', life: 1.15 }); this.beep(95, 0.22); this.burst(22, '#d6b173'); }
+    if (event.type === 'land' && event.banked > 0) { this.notices.push({ text: `+${event.banked.toLocaleString('pt-BR')}`, sub: event.flips ? 'POUSO PERFEITO!' : 'SALTO LIMPO!', color: '#dbffbb', life: 1.1 }); this.beep(event.flips ? 1100 : 570, 0.11); this.burst(10, '#cfaa68'); }
+    if (event.type === 'crash') { this.flash = 0.5; this.notices.push({ text: this.state.lives ? '−1 VIDA' : 'FIM DA TRILHA', sub: this.state.lives ? 'Retome a pista e proteja as vidas restantes.' : 'Sua pontuação está sendo salva.', color: '#ffc5a2', life: 1.15 }); this.beep(95, 0.22); this.burst(22, '#d6b173'); }
     if (event.type === 'jump') this.burst(6, '#cfaa68');
     if (this.notices.length > 2) this.notices.shift();
   }
@@ -107,8 +123,8 @@ export class FreestyleGame {
     const c = this.ctx, w = this.width, h = this.height, s = this.state;
     const landscape = w > h * 1.4;
     this.zoom = Math.min(w / 490, h / (landscape ? 370 : 450), 1.25);
-    const baseline = h * (landscape ? 0.79 : 0.76);
-    const lift = landscape ? clamp(28 + (s.y + 86) * this.zoom - baseline, 0, h * 0.15) : 0;
+    const baseline = landscape && h < 400 ? h - 88 : h * (landscape ? 0.79 : 0.76);
+    const lift = landscape ? clamp(70 + (s.y + 86) * this.zoom - baseline, 0, h * 0.8) : 0;
     this.cameraLift = delta > 0 ? (this.cameraLift ?? 0) + (lift - (this.cameraLift ?? 0)) * Math.min(1, delta * 10) : lift;
     this.groundLine = baseline + this.cameraLift;
     this.cameraX = s.x - w * 0.29 / this.zoom;
@@ -120,7 +136,7 @@ export class FreestyleGame {
     this.ellipse(sunX, sunY, w * 0.048, w * 0.048, '#ffecb6');
     this.clouds(); this.mountains(); this.scenery(); this.terrain();
     for (const ramp of this.course) {
-      if (ramp.start > this.cameraX + w / this.zoom + 100) break;
+      if (ramp.origin > this.cameraX + w / this.zoom + 100) break;
       if (ramp.end < this.cameraX - 100) continue;
       for (const obstacle of ramp.obstacles) this.obstacle(obstacle);
       this.rampFlags(ramp);
@@ -137,7 +153,10 @@ export class FreestyleGame {
       const at = this.project(p.x, p.y); c.globalAlpha = clamp(p.life * 2, 0, 0.55); this.ellipse(at.x, at.y, this.zoom * (2 + (0.65 - p.life) * 8), this.zoom * (2 + (0.65 - p.life) * 4), p.color);
     }
     this.particles = this.particles.filter(p => p.life > 0); c.globalAlpha = 1;
+    c.save();
+    if (s.tick < s.invulnerableUntil && Math.floor(s.tick / 6) % 2 === 0) c.globalAlpha = 0.45;
     this.motorcycle();
+    c.restore();
     this.flash = Math.max(0, this.flash - delta);
     if (this.flash) { c.fillStyle = `rgba(245,108,58,${this.flash * 0.22})`; c.fillRect(0, 0, w, h); }
     this.notices.forEach(notice => { notice.life -= delta; }); this.notices = this.notices.filter(notice => notice.life > 0);
@@ -148,7 +167,7 @@ export class FreestyleGame {
       c.font = `600 ${Math.min(12, w * 0.031)}px system-ui, sans-serif`; c.lineWidth = 3; c.strokeText(notice.sub, w / 2, h * 0.24 + 24); c.fillStyle = '#f8f5df'; c.fillText(notice.sub, w / 2, h * 0.24 + 24); c.restore();
     }
     // Pending points stay in the HUD so the airborne rider remains unobstructed.
-    if (!countdown && s.tick < 135 && s.vx < 0.8 && this.running) this.hint('SEGURE ACELERAR', 'Ganhe velocidade para subir as rampas.');
+    if (!countdown && s.tick < 135 && s.vx < 0.8 && this.running) this.hint('ACELERE E PREPARE O SALTO', 'Deslize o acelerador para cima ao chegar ao obstáculo.');
     if (s.respawnTicks > 0) {
       c.save(); c.textAlign = 'center'; c.font = '700 12px system-ui'; c.fillStyle = '#fff3ce'; c.fillText('RETOMANDO A TRILHA…', w / 2, h * 0.60); c.restore();
     }
@@ -401,8 +420,8 @@ export class FreestyleGame {
     c.strokeStyle = '#f9d44a'; c.lineWidth = 3; c.beginPath(); c.arc(x, y, r + 7, -Math.PI / 2, -Math.PI / 2 + (remaining % 1 || 1) * TAU); c.stroke();
     this.ellipse(x, y, r, r, '#f4d13f'); c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#1b3522'; c.font = `900 italic ${r * 1.30}px system-ui`; c.fillText(String(Math.ceil(remaining)), x - 2, y + 1);
     c.textBaseline = 'alphabetic'; c.fillStyle = '#fff6d4'; c.font = `900 italic ${Math.min(23, w * 0.063)}px system-ui`; c.fillText('FREEDOM FREESTYLE', x, y - r - 26);
-    c.font = '600 12px system-ui'; c.fillStyle = '#f1f0d7'; c.fillText('Acelere. Gire no ar. Pouse para pontuar.', x, y + r + 35);
-    c.fillStyle = '#ffe467'; c.fillText('Solte a inclinação para alinhar a moto.', x, y + r + 57);
+    c.font = '600 12px system-ui'; c.fillStyle = '#f1f0d7'; c.fillText('Acelere. Salte obstáculos. Pouse para pontuar.', x, y + r + 35);
+    c.fillStyle = '#ffe467'; c.fillText('Deslize o acelerador para cima para saltar.', x, y + r + 57);
   }
 }
 

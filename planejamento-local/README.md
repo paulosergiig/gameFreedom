@@ -24,6 +24,7 @@ Esta pasta reúne os registros de planejamento, estudo e análise do jogo promoc
 7. [Implementação atual e verificações](07-implementacao.md)
 8. [Estudo do segundo jogo com visão lateral](08-segundo-jogo-lateral.md)
 9. [Implementação do Freedom Freestyle](09-freestyle-implementacao.md)
+10. [Melhorias após uso real: vidas, progressão e tela móvel](10-melhorias-sobrevivencia.md)
 
 O usuário autorizou criar o jogo e confirmou que o ranking é recreativo, sem premiação. Consulte [Implementação atual](07-implementacao.md).
 
@@ -36,3 +37,8 @@ O acesso principal será pelo smartphone do visitante, via QR code. A recomenda�
 ## Etapa consultiva atual
 
 O primeiro jogo foi aprovado pelo usuário e deve ser preservado. Após a etapa consultiva, o usuário autorizou explicitamente criar o Freedom Freestyle em 16/09/2026: visão lateral, manobras e pontuação, com prioridade para celular deitado. A restrição anterior de não criar código terminou com essa autorização. O segundo modo foi implementado e validado localmente; consulte o registro 09 para o resultado e as verificações.
+
+
+## Evolução após publicação
+
+O usuário informou que o jogo está online e recebeu sugestões de participantes. Autorizou implementar localmente três vidas, dificuldade progressiva, salvamento ao sair, melhor descoberta dos dois jogos e ajustes para Safari. Confirmou manter recordes antigos junto com os novos. Após a entrega da versão local para teste, o usuário autorizou explicitamente enviar esta atualização ao GitHub. A atualização do servidor será uma etapa separada. As regras históricas de 60/90 segundos nos documentos anteriores foram substituídas para novas partidas; consulte o documento 10.

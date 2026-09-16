@@ -1,5 +1,7 @@
 # Freedom Freestyle — implementação
 
+> Registro histórico da versão com tempo fixo. As melhorias atuais com três vidas e os recordes combinados estão no [documento 10](10-melhorias-sobrevivencia.md).
+
 Data: 16/09/2026.
 Status: implementado e validado localmente.
 
