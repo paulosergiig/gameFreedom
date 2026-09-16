@@ -1,0 +1,22 @@
+{
+  "name": "desafio-freedom",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Jogo promocional da Pneus Freedom com ranking recreativo.",
+  "engines": {
+    "node": ">=24.11.0 <25"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "dev": "node --env-file-if-exists=.env --watch server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "playwright test",
+    "qr": "node scripts/make-qr.mjs",
+    "admin": "node --env-file-if-exists=.env scripts/admin.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "qrcode": "1.5.4"
+  }
+}
