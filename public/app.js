@@ -6,9 +6,10 @@ const format = (value) => new Intl.NumberFormat('pt-BR').format(Number(value) ||
 const modeOf = (mode) => mode === 'freestyle' ? 'freestyle' : 'classic';
 const apiBase = mode => `/api/survival/${modeOf(mode)}`;
 const PENDING_KEY = 'freedom-survival-pending-v1';
+const PLAYER_CHANGE_KEY = 'freedom-player-change-v1';
 let checkpointTimer, recoveryPromise;
 let recoveredSession = null;
-const state = { session: null, sessionPromise: null, game: null, activeRun: null, screen: 'home', selectedMode: 'classic', resultMode: 'classic', rankingMode: 'classic', opening: false, starting: false, savingName: false, finishing: false, pending: null, sound: false, tutorialSeen: { classic: false, freestyle: false }, rankingRequest: 0, toastTimer: 0 };
+const state = { session: null, sessionPromise: null, game: null, activeRun: null, screen: 'home', selectedMode: 'classic', resultMode: 'classic', rankingMode: 'classic', opening: false, starting: false, savingName: false, switching: false, switchFromTag: null, finishing: false, pending: null, sound: false, tutorialSeen: { classic: false, freestyle: false }, rankingRequest: 0, toastTimer: 0 };
 const gasGestures = new Map();
 const heldPointers = new Map();
 const heldKeys = new Map();
@@ -36,16 +37,105 @@ async function request(path, { method = 'GET', body, csrf = true, timeout = 1500
     throw new ApiError('Sem conexão com a pista. Confira sua internet e tente novamente.', 'NETWORK', 0);
   } finally { clearTimeout(timer); }
 }
-async function ensureSession() {
-  if (state.session) return state.session;
+async function ensureSession(refresh = false) {
+  if (!refresh && state.session) return state.session;
   if (!state.sessionPromise) {
     state.sessionPromise = request('/api/session', { csrf: false }).then((data) => {
-      state.session = data;
+      acceptSession(data);
       $('#retention-days').textContent = String(data.privacy?.retentionDays || 30);
       return data;
     }).finally(() => { state.sessionPromise = null; });
   }
   return state.sessionPromise;
+}
+function updatePlayer() {
+  const player = state.session?.player;
+  $('#player-bar').hidden = !player;
+  $('#current-player-name').textContent = player?.name || '';
+  $('#switch-player').disabled = state.switching;
+}
+function acceptSession(data) {
+  if (state.session?.player?.tag !== data.player?.tag) state.tutorialSeen = { classic: false, freestyle: false };
+  state.session = data;
+  updatePlayer();
+}
+async function refreshIdlePlayer() {
+  if (state.activeRun || state.pending || state.finishing || state.starting || state.opening || state.switching || state.savingName) return;
+  const previous = state.session?.player?.tag;
+  try {
+    await ensureSession(true);
+    if (previous && previous !== state.session.player?.tag) {
+      closeDialogs(); showScreen('home');
+      toast(state.session.player ? 'Jogador atualizado: ' + state.session.player.name + '. Escolha uma pista para jogar.' : 'Escolha seu nome ao iniciar uma nova partida.');
+    }
+  } catch { /* Starting a game or switching players retries the connection. */ }
+}
+async function openPlayerSwitch() {
+  if (state.activeRun || state.starting || state.opening || state.switching || state.savingName) return;
+  if (state.finishing) { toast('Aguarde a confirmação da pontuação antes de trocar de jogador.'); return; }
+  state.switching = true; updatePlayer();
+  try {
+    await recoveryPromise;
+    await ensureSession(true);
+    await recoverPending();
+    if (state.pending) await submitResult();
+    if (state.pending) { toast('Salve a pontuação pendente antes de trocar de jogador. Confira a conexão e tente novamente.'); return; }
+    const player = state.session?.player;
+    if (!player) { toast('Escolha uma pista para informar seu nome e começar.'); return; }
+    state.switchFromTag = player.tag;
+    $('#previous-player-name').textContent = player.name;
+    $('#keep-player').textContent = 'CONTINUAR COMO ' + player.name;
+    $('#switch-player-name').value = '';
+    $('#switch-player-error').textContent = '';
+    closeDialogs(); showDialog('#switch-player-dialog');
+    $('#switch-player-name').focus();
+  } catch (error) { toast(error.message); }
+  finally { state.switching = false; updatePlayer(); }
+}
+function switchedPlayer(data) {
+  acceptSession(data);
+  recoveredSession = data;
+  state.tutorialSeen = { classic: false, freestyle: false };
+  ++state.rankingRequest;
+  closeDialogs(); showScreen('home');
+  // A notification only: authentication stays exclusively in the HttpOnly cookie.
+  try { localStorage.setItem(PLAYER_CHANGE_KEY, Date.now() + ':' + Math.random()); } catch { /* Focus/visibility also refresh the identity. */ }
+  toast('Agora é a vez de ' + data.player.name + '. Escolha seu jogo!');
+}
+async function switchPlayer(event) {
+  event.preventDefault();
+  if (state.switching || state.activeRun || state.pending || state.finishing) return;
+  const input = $('#switch-player-name');
+  const name = input.value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  if ([...name].length < 2 || [...name].length > 20) {
+    $('#switch-player-error').textContent = 'Escolha um apelido entre 2 e 20 caracteres.'; input.focus(); return;
+  }
+  state.switching = true; updatePlayer();
+  const controls = $('#switch-player-dialog').querySelectorAll('button, input');
+  controls.forEach(control => { control.disabled = true; });
+  $('#confirm-player-switch').setAttribute('aria-busy', 'true');
+  $('#switch-player-error').textContent = '';
+  let sent = false;
+  try {
+    await ensureSession(true);
+    if (state.session.player?.tag !== state.switchFromTag) throw new ApiError('O jogador mudou em outra aba. Feche esta janela e confira o nome atual antes de trocar.', 'PLAYER_CHANGED', 409);
+    sent = true;
+    const data = await request('/api/player/switch', { method: 'POST', body: { name, previousTag: state.switchFromTag } });
+    switchedPlayer(data);
+  } catch (error) {
+    // A lost response may already have installed the new cookie. Read it before offering a retry.
+    if (sent && ['NETWORK', 'TIMEOUT', 'CSRF'].includes(error.code)) {
+      try {
+        const data = await ensureSession(true);
+        if (data.player?.tag !== state.switchFromTag && data.player?.name === name) { switchedPlayer(data); return; }
+      } catch { /* Keep the dialog open; the next attempt rechecks the session first. */ }
+    }
+    $('#switch-player-error').textContent = error.message;
+  } finally {
+    state.switching = false; updatePlayer();
+    controls.forEach(control => { control.disabled = false; });
+    $('#confirm-player-switch').removeAttribute('aria-busy');
+  }
 }
 function toast(message) {
   clearTimeout(state.toastTimer);
@@ -76,13 +166,13 @@ function showScreen(name, focus = true) {
   }
 }
 async function play(mode = 'classic') {
-  if (state.opening || state.starting || state.finishing || state.activeRun) return;
+  if (state.opening || state.starting || state.finishing || state.activeRun || state.switching) return;
   state.opening = true;
   state.selectedMode = modeOf(mode);
   const buttons = document.querySelectorAll('[data-action="play"], [data-action="play-freestyle"]');
   buttons.forEach((button) => { button.disabled = true; });
   try {
-    await ensureSession();
+    await ensureSession(true);
     await recoveryPromise;
     await recoverPending();
     if (state.pending) { closeDialogs(); showScreen('result'); submitResult(); return; }
@@ -124,9 +214,11 @@ async function saveName(event) {
   $('#save-name').setAttribute('aria-busy', 'true');
   $('#name-error').textContent = '';
   try {
-    await ensureSession();
+    await ensureSession(true);
+    if (state.session.player) { closeDialogs(); showScreen('home'); toast('Este navegador já está jogando como ' + state.session.player.name + '. Use Trocar jogador para outra pessoa.'); return; }
     const response = await request('/api/player', { method: 'POST', body: { name } });
     state.session.player = response.player;
+    updatePlayer();
     $('#name-dialog').close();
     openTutorial();
   } catch (error) { $('#name-error').textContent = error.message; }
@@ -137,7 +229,7 @@ async function saveName(event) {
   }
 }
 async function startRun(mode = state.selectedMode) {
-  if (state.starting || state.activeRun || state.finishing) return;
+  if (state.starting || state.activeRun || state.finishing || state.switching || state.savingName) return;
   mode = modeOf(mode);
   state.starting = true;
   state.selectedMode = mode;
@@ -149,7 +241,11 @@ async function startRun(mode = state.selectedMode) {
   startButton.setAttribute('aria-busy', 'true');
   startError.textContent = '';
   try {
-    await ensureSession();
+    const previousTag = state.session?.player?.tag;
+    await ensureSession(true);
+    if (!state.session.player || state.session.player.tag !== previousTag) {
+      closeDialogs(); showScreen('home'); toast('O jogador mudou neste navegador. Confira o nome e escolha seu jogo novamente.'); return;
+    }
     const run = await request(`${apiBase(mode)}/runs`, { method: 'POST', body: {} });
     state.pending = null;
     state.activeRun = { ...run, mode, ackTick: 0, lastAckAt: Date.now(), syncing: false };
@@ -218,9 +314,9 @@ function updateFreestyleHud({ score, pending, elapsed, combo, airborne, lives, l
   $('#freestyle-combo').textContent = 'COMBO ×' + Math.max(1, combo || 1);
   $('#freestyle-flight-hud').classList.toggle('is-airborne', Boolean(airborne));
 }
-function pendingSnapshot(run, reason = 'exit') {
+function pendingSnapshot(run, reason = 'exit', inProgress = false) {
   const snapshot = state.game.snapshot(run.ackTick);
-  return { runId: run.runId, mode: run.mode, tag: state.session?.player?.tag,
+  return { runId: run.runId, mode: run.mode, tag: state.session?.player?.tag, inProgress,
     body: { version: run.version, fromTick: run.ackTick, ...snapshot, end: true, reason } };
 }
 function storePending(pending) {
@@ -236,11 +332,11 @@ function syncPath(pending) { return apiBase(pending.mode) + '/runs/' + encodeURI
 function startCheckpoints() {
   clearInterval(checkpointTimer);
   let count = 0;
-  storePending(pendingSnapshot(state.activeRun));
+  storePending(pendingSnapshot(state.activeRun, 'exit', true));
   checkpointTimer = setInterval(() => {
     const run = state.activeRun;
     if (!run || !state.game) return;
-    storePending(pendingSnapshot(run));
+    storePending(pendingSnapshot(run, 'exit', true));
     if (Date.now() - run.lastAckAt > 20000) { state.game.finish('connection'); return; }
     if (++count % 5 === 0) syncProgress(run);
   }, 1000);
@@ -255,7 +351,7 @@ async function syncProgress(run) {
     run.ackTick = Math.max(run.ackTick, response.tick);
     run.lastAckAt = Date.now();
     state.game.acknowledge(response.tick);
-    storePending(pendingSnapshot(run));
+    storePending(pendingSnapshot(run, 'exit', true));
     if (response.finished) state.game.finish('connection');
   } catch { /* Retry on the next heartbeat; finish after a prolonged outage. */ }
   finally { run.syncing = false; }
@@ -335,10 +431,21 @@ async function submitResult() {
 }
 async function recoverPending() {
   if (!state.session || recoveredSession === state.session || state.activeRun || state.pending) return;
-  recoveredSession = state.session;
   let pending;
   try { pending = JSON.parse(localStorage.getItem(PENDING_KEY)); } catch { return; }
   if (!pending || !['classic', 'freestyle'].includes(pending.mode) || !pending.runId || !pending.body || pending.tag !== state.session?.player?.tag) return;
+  // localStorage is shared by tabs. A live checkpoint may belong to another open window.
+  // Only an explicit final snapshot can be resent immediately; let the server expire a crashed tab.
+  if (pending.inProgress !== false) {
+    try {
+      const status = await request(apiBase(pending.mode) + '/runs/' + encodeURIComponent(pending.runId));
+      if (!status.finished) return;
+    } catch (error) {
+      if (error.code === 'RUN_NOT_FOUND') { clearPending(pending.runId); return; }
+      throw error;
+    }
+  }
+  recoveredSession = state.session;
   state.pending = pending;
   pending.body.end = true;
   prepareResult(pending);
@@ -404,7 +511,7 @@ async function loadRanking() {
   $('#my-ranking').hidden = true;
   $('#ranking-total').textContent = '';
   try {
-    await ensureSession();
+    await ensureSession(true);
     const data = await request(`${apiBase(mode)}/leaderboard`);
     if (requestId === state.rankingRequest) renderRanking(data);
   } catch (error) { if (requestId === state.rankingRequest) $('#ranking-status').textContent = error.message; }
@@ -530,6 +637,7 @@ document.querySelectorAll('[data-action]').forEach((button) => {
       case 'play': play(contextualMode(button)); break;
       case 'play-freestyle': play('freestyle'); break;
       case 'ranking': openRanking(contextualMode(button)); break;
+      case 'switch-player': openPlayerSwitch(); break;
       case 'privacy': showDialog('#privacy-dialog'); break;
       case 'home': if (!state.activeRun) { closeDialogs(); showScreen('home'); } break;
     }
@@ -547,6 +655,10 @@ document.querySelectorAll('[data-ranking-mode]').forEach((button) => {
 });
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
 $('#name-form').addEventListener('submit', saveName);
+$('#switch-player-form').addEventListener('submit', switchPlayer);
+$('#switch-player-dialog').addEventListener('cancel', event => { if (state.switching) event.preventDefault(); });
+window.addEventListener('storage', event => { if (event.key === PLAYER_CHANGE_KEY) refreshIdlePlayer(); });
+window.addEventListener('focus', refreshIdlePlayer);
 $('#start-run').addEventListener('click', () => startRun('classic'));
 $('#start-freestyle').addEventListener('click', () => startRun('freestyle'));
 $('#refresh-ranking').addEventListener('click', loadRanking);
@@ -582,6 +694,7 @@ for (const selector of ['#classic-fullscreen', '#freestyle-fullscreen']) $(selec
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) state.game?.finish('hidden');
   else if (state.pending) submitResult();
+  else refreshIdlePlayer();
 });
 window.addEventListener('pagehide', () => {
   state.game?.finish('pagehide');
@@ -590,5 +703,6 @@ window.addEventListener('pagehide', () => {
 window.addEventListener('pageshow', event => {
   updateViewport();
   if (event.persisted && state.pending) submitResult();
+  else if (event.persisted) refreshIdlePlayer();
 });
 recoveryPromise = ensureSession().then(recoverPending).catch(() => { /* Starting or opening the ranking retries connectivity. */ });

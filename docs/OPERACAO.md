@@ -5,11 +5,23 @@
 - Top 10, recorde e posição pessoal independentes para Desafio Freedom e Freedom Freestyle.
 - As partidas atuais usam três vidas, dificuldade progressiva e duração aberta. O tempo mostrado mede a sobrevivência.
 - Por decisão explícita do usuário, os recordes anteriores de 60/90 segundos aparecem junto com os novos. Para cada participante vale a maior pontuação entre as duas versões daquele jogo. Os dados antigos permanecem intactos.
-- A sessão e o apelido são compartilhados. Nomes iguais não juntam pessoas; cada navegador mantém uma posição por jogo, combinando seu melhor resultado antigo ou novo.
+- A sessão e o apelido selecionados são compartilhados entre os dois jogos. Nomes iguais não juntam pessoas; cada participante mantém uma posição por jogo, combinando seu melhor resultado antigo ou novo. Um navegador pode selecionar outro participante com “Trocar jogador”.
 - Empates compartilham posição; a ordem visual é estabilizada pela data do resultado e identificador. Se o mesmo recorde pessoal existir nas duas versões, vale a data mais antiga.
 - Não há premiação, sorteio, cadastro de contatos ou comprovação de identidade.
 
 O servidor reconstitui os comandos recebidos com as mesmas regras determinísticas do navegador. Não aceita pontuação, quantidade de vidas ou posição da moto informadas pelo cliente. Isso impede adulterar apenas o número de pontos, mas não elimina automação de controles.
+
+## Aparelho compartilhado
+
+A faixa “Jogando como” aparece no início, no ranking e no resultado, depois de informar o primeiro apelido. **Trocar jogador** abre um formulário para a próxima pessoa. Fechar a janela ou escolher “Continuar como…” mantém a participação atual. Confirmar cria uma nova identificação para os dois jogos; não renomeia nem transfere os recordes anteriores.
+
+O nome selecionado permanece nas visitas seguintes, dentro da retenção da sessão. O jogo não oferece login nem lista de perfis para restaurar participações anteriores: usar de novo um apelido cria outra participação. Os recordes anteriores continuam públicos até sua exclusão ou expiração normal. A troca não renova a retenção do participante anterior.
+
+A interface aguarda a confirmação de pontuações pendentes antes da troca. A API também bloqueia a troca enquanto existir uma partida ativa, inclusive em outra aba. Um checkpoint ainda ativo compartilhado entre abas não é enviado como encerramento pela tela de troca nem pela recuperação de uma página recém-aberta. Se o navegador morrer sem emitir a saída, vale a finalização do servidor após a inatividade já descrita abaixo.
+
+A troca usa POST /api/player/switch, protegida por sessão, Origin e CSRF. O servidor valida o apelido e a identificação anterior, aplica os limites existentes de criação por IP e global e emite um novo cookie HttpOnly/SameSite (Secure em HTTPS), com novo CSRF. Um aviso local avisa as outras abas para reler a sessão; esse aviso não armazena tokens de autenticação. A identidade também é conferida ao voltar à página e antes de iniciar uma partida.
+
+Não exige migração, limpeza do banco, outra porta nem alteração do Tunnel. A publicação continua com git pull e reinício do processo.
 
 ## Confirmação durante a partida
 
@@ -82,3 +94,9 @@ A tela usa a altura disponível e controles compactos em paisagem. Tela cheia de
 HTTPS e Tunnel protegem o transporte e evitam expor diretamente o processo, mas não substituem atualizações e permissões restritas. A aplicação limita requisições, valida sessão/Origin/CSRF, reconstitui resultados e publica somente arquivos permitidos. O token enviado por beacon só é aceito no corpo JSON da rota de confirmação; a origem e a sessão continuam obrigatórias.
 
 O link pode circular fora da feira. O QR facilita acesso e não comprova presença física, compatível com o ranking recreativo definido pelo usuário.
+
+## Entrega de versões e cache
+
+Reinicie o processo após concluir a atualização dos arquivos; o frontend em execução é um snapshot consistente em memória. `GET /api/version` informa sua identidade sem criar sessão. HTML, APIs e o carregador não devem ser armazenados por caches intermediários.
+
+O procedimento continua sendo `git pull` e reinício, sem novo comando de build ou migração de dados. [Detalhes e diagnóstico de cache](ATUALIZACOES-E-CACHE.md).

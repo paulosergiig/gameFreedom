@@ -136,3 +136,9 @@ Não é preciso criar outro subdomínio, abrir portas ou mudar o QR code existen
 Se for necessário voltar, pare somente o jogo e restaure o código anterior. Como a migração é aditiva, o código anterior pode continuar usando suas tabelas originais; os novos dados permanecem guardados, embora a interface antiga não os apresente. Antes da reversão, faça um novo backup consistente para preservar também os resultados recebidos após a atualização.
 
 Restaure um banco anterior somente se houver necessidade comprovada: isso pode descartar resultados posteriores ao backup. Faça a operação com o processo parado, use um diretório de dados novo e ajuste DB_PATH de forma controlada. Nunca sobreponha um banco ativo nem misture WAL/SHM de cópias diferentes. Valide os registros antes de retomar.
+
+## Cache em atualizações futuras
+
+O endereço atual informado é `https://game.freedom.dev.br`, servido pelo Node na porta 3100 via Cloudflare Tunnel. Esta correção não altera esses valores. Após `git pull` e reinício, o servidor calcula automaticamente o hash do frontend completo; não é necessário build, versão manual ou limpeza de cache dos visitantes.
+
+Mantenha as políticas de cache da origem para HTML, APIs e `/boot.js`. Recursos em `/static/HASH/` podem permanecer em cache porque cada versão tem outra URL. Consulte [Atualizações e cache](ATUALIZACOES-E-CACHE.md) para a conferência após publicar e a distinção entre cache HTTP e abas já abertas.

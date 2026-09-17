@@ -25,6 +25,8 @@ Esta pasta reúne os registros de planejamento, estudo e análise do jogo promoc
 8. [Estudo do segundo jogo com visão lateral](08-segundo-jogo-lateral.md)
 9. [Implementação do Freedom Freestyle](09-freestyle-implementacao.md)
 10. [Melhorias após uso real: vidas, progressão e tela móvel](10-melhorias-sobrevivencia.md)
+11. [Correção de cache após atualização em produção](11-cache-e-atualizacoes.md)
+12. [Troca de jogador em aparelho compartilhado](12-aparelho-compartilhado.md)
 
 O usuário autorizou criar o jogo e confirmou que o ranking é recreativo, sem premiação. Consulte [Implementação atual](07-implementacao.md).
 

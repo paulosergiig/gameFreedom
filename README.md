@@ -32,6 +32,7 @@ A área de jogo se adapta ao espaço visível do navegador. No iPhone, a experi�
 
 - Escolha um apelido de 2 a 20 caracteres e um dos dois jogos.
 - Consulte as instruções antes da primeira tentativa.
+- Em aparelho compartilhado, confira “Jogando como” e use **Trocar jogador** para outra pessoa. Cancelar mantém o jogador atual; confirmar cria uma participação separada, preservando os recordes anteriores.
 - Ao acabar a terceira vida ou encerrar a partida, o resultado confirmado entra no ranking daquele modo. Pontos dos jogos não são somados.
 - A página confirma o progresso com o servidor periodicamente e tenta enviar o trecho final ao sair ou trocar de aplicativo.
 - Se o sistema fechar o navegador sem permitir o último envio, o servidor encerra a tentativa após 30 segundos sem confirmação e preserva o último trecho recebido. Os segundos ainda não enviados podem se perder.
@@ -39,7 +40,7 @@ A área de jogo se adapta ao espaço visível do navegador. No iPhone, a experi�
 
 Os recordes anteriores e os novos aparecem juntos no ranking de cada jogo, conforme decisão do usuário. Vale a maior pontuação de cada participante entre as duas versões; os dados antigos são preservados e um resultado menor nunca os substitui. O apelido e a sessão continuam os mesmos.
 
-A identidade é daquele navegador. Não existe comprovação de pessoa única e não há proteção absoluta contra automação.
+O navegador mantém o jogador selecionado até uma troca explícita ou expiração da sessão. Cada troca cria outra identificação nos dois jogos; digitar um nome anterior não recupera sua participação, pois não há login. Nomes iguais não juntam pontuações. Não existe comprovação de pessoa única e não há proteção absoluta contra automação.
 
 ## Testes
 
@@ -79,3 +80,9 @@ Os arquivos PNG e SVG são gravados em `output/qrcode/`. O comando valida o dom�
 Por decisão do usuário em 16/09/2026, o planejamento deve ser versionado no repositório privado [gameFreedom](https://github.com/paulosergiig/gameFreedom). Dados de execução, `.env`, backups e arquivos de `output/` continuam ignorados pelo Git.
 
 A aplicação serve uma lista restrita de arquivos dentro de `public/`. Nunca configure outro servidor para publicar a raiz do repositório.
+
+## Atualizações sem misturar arquivos em cache
+
+O servidor identifica automaticamente cada versão do frontend por seu conteúdo e entrega CSS, módulos dos dois jogos, imagens e fontes em URLs próprias. HTML e APIs não são armazenados. Continue publicando com `git pull` e reinício do processo: não há build nem versão manual. Banco e sessões são preservados.
+
+Em desenvolvimento, `npm run dev` acompanha alterações em `public/`, `lib/` e `server.mjs`; com `npm start`, reinicie após editar arquivos. Consulte [Atualizações e cache](docs/ATUALIZACOES-E-CACHE.md) para o diagnóstico, recuperação de abas antigas e verificação dos cabeçalhos no Cloudflare.

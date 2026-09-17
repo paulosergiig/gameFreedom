@@ -1,9 +1,9 @@
 import http from 'node:http';
-import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { configuration } from './lib/config.mjs';
+import { createStaticRelease, cacheHeaders } from './lib/static-release.mjs';
 import { openDatabase, prune, playerView, leaderboard, freestylePlayerView, freestyleLeaderboard } from './lib/store.mjs';
 import { cookieName, cookieToken, csrfFor, equalToken, hash, clientAddress, RateLimiter, cleanName, validateMoves } from './lib/security.mjs';
 import { simulateRun } from './public/shared/rules.js';
@@ -11,8 +11,6 @@ import { survivalService, SurvivalError } from './lib/survival.mjs';
 import { simulateFreestyleRun, FREESTYLE_VERSION, FREESTYLE_DURATION_TICKS, FREESTYLE_MAX_INPUTS } from './public/shared/freestyle-rules.js';
 
 const EVENT = Object.freeze({ title: 'Desafio Freedom', id: 'motonordeste-2026' });
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon' };
-const STATIC = new Set(['/index.html', '/styles.css', '/app.js', '/game.js', '/shared/rules.js', '/freestyle.js', '/shared/freestyle-rules.js', '/favicon.svg', '/shared/classic-survival.js', '/shared/freestyle-survival.js']);
 class ApiError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
 }
@@ -40,6 +38,7 @@ async function readJson(req, maxBytes = 24576) {
   } catch { error(400, 'INVALID_JSON', 'Não foi possível ler os dados enviados.'); }
 }
 function securityHeaders(res, secure) {
+  cacheHeaders(res);
   res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; manifest-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'");
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -66,6 +65,7 @@ function resourcePath(req) {
 }
 export function createApp(options = {}) {
   const config = configuration(options);
+  const release = createStaticRelease(config.publicDir);
   const now = options.now ?? Date.now;
   const db = openDatabase(config.dbPath);
   const limiter = new RateLimiter();
@@ -91,9 +91,7 @@ export function createApp(options = {}) {
     const player = db.prepare('SELECT * FROM players WHERE id = ? AND expires_at > ?').get(hash(token), time);
     return player ? { token, player } : null;
   }
-  function makeSession(req, res, time, ip) {
-    const existing = findSession(req, time);
-    if (existing) return existing;
+  function createSession(res, time, ip, name = null) {
     rate(`new:${ip}`, 180, 600000, time);
     rate('new:global', 3000, 600000, time);
     if (db.prepare('SELECT count(*) AS n FROM players').get().n >= 100000) error(503, 'CAPACITY', 'O jogo está cheio agora. Tente novamente em breve.');
@@ -101,9 +99,15 @@ export function createApp(options = {}) {
     const id = hash(token);
     const tag = randomBytes(6).toString('hex').toUpperCase();
     const age = config.retentionDays * 86400;
-    db.prepare('INSERT INTO players(id,tag,created_at,expires_at) VALUES(?,?,?,?)').run(id, tag, time, time + age * 1000);
+    db.prepare('INSERT INTO players(id,tag,name,created_at,expires_at) VALUES(?,?,?,?,?)').run(id, tag, name, time, time + age * 1000);
     res.setHeader('Set-Cookie', `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${secure ? '; Secure' : ''}`);
     return { token, player: db.prepare('SELECT * FROM players WHERE id = ?').get(id) };
+  }
+  function makeSession(req, res, time, ip) {
+    return findSession(req, time) ?? createSession(res, time, ip);
+  }
+  function sessionView(session, time) {
+    return { player: playerView(db, session.player, time), csrfToken: csrfFor(session.token), event: EVENT, privacy: { retentionDays: config.retentionDays } };
   }
   function startRun(player, time) {
     const runId = randomBytes(24).toString('base64url');
@@ -198,26 +202,12 @@ export function createApp(options = {}) {
       return result;
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   }
-  async function serveStatic(req, res, pathname) {
-    const target = pathname === '/' ? '/index.html' : pathname;
-    const asset = /^\/assets\/[a-zA-Z0-9/_-]+\.(?:png|webp|jpg|svg|woff2|ttf|ico|js)$/.test(target);
-    if (!STATIC.has(target) && !asset) error(404, 'NOT_FOUND', 'Página não encontrada.');
-    const filename = path.join(config.publicDir, target);
-    let real;
-    let stat;
-    try {
-      real = await fs.promises.realpath(filename);
-      const rel = path.relative(await fs.promises.realpath(config.publicDir), real);
-      if (!rel || rel.startsWith('..' + path.sep) || rel === '..' || path.isAbsolute(rel)) error(404, 'NOT_FOUND', 'Página não encontrada.');
-      stat = await fs.promises.stat(real);
-      if (!stat.isFile()) error(404, 'NOT_FOUND', 'Página não encontrada.');
-    } catch { error(404, 'NOT_FOUND', 'Página não encontrada.'); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(real)] ?? 'application/octet-stream', 'Content-Length': stat.size, 'Cache-Control': 'no-cache' });
-    if (req.method === 'HEAD') { res.end(); return; }
-    const stream = fs.createReadStream(real);
-    stream.on('error', () => res.destroy());
-    res.on('close', () => stream.destroy());
-    stream.pipe(res);
+  function serveStatic(req, res, pathname) {
+    const file = release.resolve(pathname);
+    if (!file) error(404, 'NOT_FOUND', 'Página não encontrada.');
+    cacheHeaders(res, file.cache);
+    res.writeHead(200, { 'Content-Type': file.type, 'Content-Length': file.body.length });
+    res.end(req.method === 'HEAD' ? undefined : file.body);
   }
   const server = http.createServer({ maxHeaderSize: 16384 }, async (req, res) => {
     securityHeaders(res, secure);
@@ -236,10 +226,11 @@ export function createApp(options = {}) {
       }
       if (req.headers['sec-fetch-site'] === 'cross-site') error(403, 'CROSS_SITE', 'Abra o jogo pelo endereço oficial.');
       if (req.method === 'GET') {
+        if (pathname === '/api/version') { json(res, 200, { version: release.version }); return; }
         if (pathname === '/api/health') { json(res, 200, { ok: true }); return; }
         if (pathname === '/api/session') {
           const session = makeSession(req, res, time, ip);
-          json(res, 200, { player: playerView(db, session.player, time), csrfToken: csrfFor(session.token), event: EVENT, privacy: { retentionDays: config.retentionDays } });
+          json(res, 200, sessionView(session, time));
           return;
         }
         const survivalBoard = /^\/api\/survival\/(classic|freestyle)\/leaderboard$/.exec(pathname);
@@ -284,6 +275,25 @@ export function createApp(options = {}) {
         return;
       }
       if (!session.player.name) error(409, 'NAME_REQUIRED', 'Escolha seu apelido antes de jogar.');
+      if (pathname === '/api/player/switch') {
+        if (Object.keys(body).length !== 2 || !Object.hasOwn(body, 'name') || !Object.hasOwn(body, 'previousTag') || typeof body.previousTag !== 'string') {
+          error(400, 'INVALID_BODY', 'Informe o apelido e o participante atual.');
+        }
+        if (body.previousTag !== session.player.tag) error(409, 'PLAYER_CHANGED', 'O participante mudou em outra aba. Confira quem vai jogar.');
+        const name = cleanName(body.name);
+        if (!name) error(400, 'INVALID_NAME', 'Use um apelido de 2 a 20 letras ou números, sem marcas ou palavras ofensivas.');
+        survival.finalizeStale(time);
+        const active = db.prepare(`
+          SELECT 1 FROM survival_runs WHERE player_id = ? AND state = 'active'
+          UNION ALL SELECT 1 FROM runs WHERE player_id = ? AND state = 'active' AND expires_at > ?
+          UNION ALL SELECT 1 FROM freestyle_runs WHERE player_id = ? AND state = 'active' AND expires_at > ?
+          LIMIT 1
+        `).get(session.player.id, session.player.id, time, session.player.id, time);
+        if (active) error(409, 'RUN_ACTIVE', 'Encerre a partida atual antes de trocar de participante.');
+        // A shared device selects a new identity; previous scores and their names stay intact.
+        json(res, 201, sessionView(createSession(res, time, ip, name), time));
+        return;
+      }
       const survivalStart = /^\/api\/survival\/(classic|freestyle)\/runs$/.exec(pathname);
       if (survivalStart) {
         if (Object.keys(body).length) error(400, 'INVALID_BODY', 'Dados inválidos para iniciar a partida.');
